@@ -87,6 +87,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_GLM_DSA,          "glm-dsa"          },
     { LLM_ARCH_BITNET,           "bitnet"           },
     { LLM_ARCH_T5,               "t5"               },
+    { LLM_ARCH_ALICEAI_T5_MOE,    "aliceai_t5_moe"    },
     { LLM_ARCH_T5ENCODER,        "t5encoder"        },
     { LLM_ARCH_JAIS,             "jais"             },
     { LLM_ARCH_JAIS2,            "jais2"            },
@@ -227,6 +228,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_LOGIT_SCALE,                       "%s.logit_scale"                       },
     { LLM_KV_DECODER_START_TOKEN_ID,            "%s.decoder_start_token_id"            },
     { LLM_KV_DECODER_BLOCK_COUNT,               "%s.decoder_block_count"               },
+    { LLM_KV_ENCODER_ATTENTION_HEAD_COUNT_KV,   "%s.encoder.attention.head_count_kv"   },
     { LLM_KV_ATTN_LOGIT_SOFTCAPPING,            "%s.attn_logit_softcapping"            },
     { LLM_KV_ROUTER_LOGIT_SOFTCAPPING,          "%s.router_logit_softcapping"          },
     { LLM_KV_FINAL_LOGIT_SOFTCAPPING,           "%s.final_logit_softcapping"           },
@@ -608,6 +610,19 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_ENC_FFN_GATE,                           "enc.blk.%d.ffn_gate" },
     { LLM_TENSOR_ENC_FFN_DOWN,                           "enc.blk.%d.ffn_down" },
     { LLM_TENSOR_ENC_FFN_UP,                             "enc.blk.%d.ffn_up" },
+    // Keep the tensor names used by the published AliceAI GGUFs.
+    { LLM_TENSOR_ENC_FFN_GATE_INP,                       "alice.enc.blk.%d.ffn_gate_inp" },
+    { LLM_TENSOR_ENC_FFN_GATE_EXPS,                      "enc.blk.%d.ffn_gate" },
+    { LLM_TENSOR_ENC_FFN_DOWN_EXPS,                      "enc.blk.%d.ffn_down" },
+    { LLM_TENSOR_ENC_FFN_UP_EXPS,                        "enc.blk.%d.ffn_up" },
+    { LLM_TENSOR_ENC_EXP_PROBS_B,                        "alice.enc.blk.%d.exp_probs_b" },
+    { LLM_TENSOR_ENC_FFN_OUTPUT_B,                       "alice.enc.blk.%d.ffn_output_b" },
+    { LLM_TENSOR_DEC_FFN_GATE_INP,                       "alice.dec.blk.%d.ffn_gate_inp" },
+    { LLM_TENSOR_DEC_FFN_GATE_EXPS,                      "dec.blk.%d.ffn_gate" },
+    { LLM_TENSOR_DEC_FFN_DOWN_EXPS,                      "dec.blk.%d.ffn_down" },
+    { LLM_TENSOR_DEC_FFN_UP_EXPS,                        "dec.blk.%d.ffn_up" },
+    { LLM_TENSOR_DEC_EXP_PROBS_B,                        "alice.dec.blk.%d.exp_probs_b" },
+    { LLM_TENSOR_DEC_FFN_OUTPUT_B,                       "alice.dec.blk.%d.ffn_output_b" },
     { LLM_TENSOR_TIME_MIX_W1,                            "blk.%d.time_mix_w1" },
     { LLM_TENSOR_TIME_MIX_W2,                            "blk.%d.time_mix_w2" },
     { LLM_TENSOR_TIME_MIX_LERP_X,                        "blk.%d.time_mix_lerp_x" },
@@ -799,6 +814,18 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_ENC_FFN_GATE,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ENC_FFN_DOWN,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_ENC_FFN_UP,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ENC_FFN_GATE_INP,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ENC_FFN_GATE_EXPS,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+    {LLM_TENSOR_ENC_FFN_DOWN_EXPS,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+    {LLM_TENSOR_ENC_FFN_UP_EXPS,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+    {LLM_TENSOR_ENC_EXP_PROBS_B,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
+    {LLM_TENSOR_ENC_FFN_OUTPUT_B,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
+    {LLM_TENSOR_DEC_FFN_GATE_INP,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_DEC_FFN_GATE_EXPS,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+    {LLM_TENSOR_DEC_FFN_DOWN_EXPS,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+    {LLM_TENSOR_DEC_FFN_UP_EXPS,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT_ID}},
+    {LLM_TENSOR_DEC_EXP_PROBS_B,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
+    {LLM_TENSOR_DEC_FFN_OUTPUT_B,           {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
     {LLM_TENSOR_FFN_GATE_INP_SHEXP,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_FFN_GATE_INP,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_SSM_IN,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
@@ -1140,6 +1167,7 @@ bool llm_arch_supports_sm_tensor(const llm_arch & arch) {
         case LLM_ARCH_GLM_DSA:
         case LLM_ARCH_BITNET:
         case LLM_ARCH_T5:
+        case LLM_ARCH_ALICEAI_T5_MOE:
         case LLM_ARCH_NEMOTRON_H:
         case LLM_ARCH_NEMOTRON_H_MOE:
         case LLM_ARCH_GRANITE_HYBRID:

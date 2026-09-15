@@ -2217,6 +2217,9 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                     tokenizer_pre == "granite-embed-multi-311m") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_GEMMA4;
                 escape_whitespaces = true;
+                if (ml.get_arch() == LLM_ARCH_ALICEAI_T5_MOE) {
+                    clean_spaces = false;
+                }
             } else if (
                     tokenizer_pre == "sarvam-moe") {
                 pre_type = LLAMA_VOCAB_PRE_TYPE_SARVAM_MOE;
@@ -2518,6 +2521,13 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
     }
     GGML_ASSERT(id_to_token.size() == token_to_id.size());
 
+    if (ml.get_arch() == LLM_ARCH_ALICEAI_T5_MOE) {
+        // Published GGUFs label byte fallback tokens as normal text.
+        for (uint32_t byte = 0; byte < 256; ++byte) {
+            id_to_token[token_to_id.at(format("<0x%02X>", byte))].attr = LLAMA_TOKEN_ATTR_BYTE;
+        }
+    }
+
     // hybriddna: the marker suffix kept k-mer ids distinct in token_to_id; erase
     // it from id_to_token so the k-mers detokenize to the bare DNA sequence. The
     // k-mers are the block right after <oov>, so only scan from there.
@@ -2538,7 +2548,9 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
     init_tokenizer(type);
 
     // determine the newline token: LLaMA "<0x0A>" == 10 == '\n', Falcon 193 == '\n'
-    if (type == LLAMA_VOCAB_TYPE_SPM) {
+    if (ml.get_arch() == LLM_ARCH_ALICEAI_T5_MOE) {
+        linefeed_id = vocab.text_to_token("\n");
+    } else if (type == LLAMA_VOCAB_TYPE_SPM) {
         try {
             linefeed_id = vocab.byte_to_token('\n');
         } catch (const std::exception & e) {
@@ -2625,7 +2637,7 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
 
             // workaround for Gemma 4
             // ref: https://github.com/ggml-org/llama.cpp/pull/21500
-            if (pre_type == LLAMA_VOCAB_PRE_TYPE_GEMMA4 && !add_bos) {
+            if (pre_type == LLAMA_VOCAB_PRE_TYPE_GEMMA4 && ml.get_arch() != LLM_ARCH_ALICEAI_T5_MOE && !add_bos) {
                 add_bos = true;
 
                 LLAMA_LOG_WARN("%s: override '%s' to 'true' for Gemma4\n", __func__, kv(LLM_KV_TOKENIZER_ADD_BOS).c_str());
@@ -3475,6 +3487,9 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
                         std::string text = fragment.raw_text.substr(fragment.offset, fragment.length);
 
                         if (escape_whitespaces) {
+                            if (add_space_prefix && !text.empty() && text[0] != ' ' && text.compare(0, 3, "\xe2\x96\x81") != 0) {
+                                text.insert(0, " ");
+                            }
                             llama_escape_whitespace(text);
                         }
 

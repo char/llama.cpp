@@ -216,6 +216,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_bitnet(params);
         case LLM_ARCH_T5:
             return new llama_model_t5(params);
+        case LLM_ARCH_ALICEAI_T5_MOE:
+            return new llama_model_aliceai_t5_moe(params);
         case LLM_ARCH_T5ENCODER:
             return new llama_model_t5encoder(params);
         case LLM_ARCH_JAIS:
@@ -2642,6 +2644,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         };
                     }
 
+                    if (arch == LLM_ARCH_ALICEAI_T5_MOE) {
+                        filter = [&](uint32_t il) { return il < hparams.dec_n_layer; };
+                    }
+
                     if (mtp_on_hybrid_qwen || mtp_on_hybrid_nemotron) {
                         filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
                     }
@@ -3022,6 +3028,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_TALKIE:
         case LLM_ARCH_MELLUM:
         case LLM_ARCH_MAPLE:
+        case LLM_ARCH_ALICEAI_T5_MOE:
             return LLAMA_ROPE_TYPE_NEOX;
 
         case LLM_ARCH_DFLASH:
@@ -3157,6 +3164,7 @@ uint64_t llama_model_n_params(const llama_model * model) {
 
 bool llama_model_has_encoder(const llama_model * model) {
     switch (model->arch) {
+        case LLM_ARCH_ALICEAI_T5_MOE:
         case LLM_ARCH_T5:
         case LLM_ARCH_T5ENCODER:
         case LLM_ARCH_EAGLE3:

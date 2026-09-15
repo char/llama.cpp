@@ -290,6 +290,8 @@ public:
 
     void set_input(const llama_ubatch * ubatch) override;
 
+    bool can_reuse(const llm_graph_params & params) override;
+
     ggml_tensor * cross_embd; // F32 [n_embd, n_outputs_enc]
 
     const llama_cross * cross;
@@ -649,6 +651,8 @@ public:
     ~llm_graph_input_attn_cross() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
 
     ggml_tensor * get_kq_mask_cross() const { return cross_kq_mask_cnv; }
 

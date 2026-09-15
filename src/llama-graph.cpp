@@ -370,6 +370,11 @@ void llm_graph_input_cross_embd::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+bool llm_graph_input_cross_embd::can_reuse(const llm_graph_params & params) {
+    return cross && cross == params.cross && !cross->v_embd.empty() &&
+        cross_embd->ne[0] == cross->n_embd && cross_embd->ne[1] == cross->n_enc;
+}
+
 template <typename T>
 static void print_mask(const T * data, int64_t n_tokens, int64_t n_kv, int64_t n_swa, llama_swa_type swa_type) {
     LLAMA_LOG_DEBUG("%s: === Attention mask ===\n", __func__);
@@ -1084,6 +1089,12 @@ void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
     } else {
         fill_mask((float *) cross_kq_mask->data);
     }
+}
+
+bool llm_graph_input_attn_cross::can_reuse(const llm_graph_params & params) {
+    return cross && cross == params.cross && !cross->v_embd.empty() &&
+        cross_kq_mask->ne[0] == cross->n_enc && cross_kq_mask->ne[1] == params.ubatch.n_tokens &&
+        cross_kq_mask->type == (params.cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32);
 }
 
 void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
@@ -2533,7 +2544,8 @@ ggml_tensor * llm_graph_context::build_inp_cross_embd() const {
     //}
 
     const auto n_embd = !cross->v_embd.empty() ? cross->n_embd : hparams.n_embd_inp();
-    const auto n_enc  = !cross->v_embd.empty() ? cross->n_enc  : hparams.n_ctx_train;
+    // Encoding must fit in one ubatch; do not reserve the full training context.
+    const auto n_enc  = !cross->v_embd.empty() ? cross->n_enc  : cparams.n_ubatch;
 
     cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, n_enc);
     ggml_set_input(cur);
@@ -3231,7 +3243,7 @@ ggml_tensor * llm_graph_context::build_attn(
 llm_graph_input_attn_cross * llm_graph_context::build_attn_inp_cross() const {
     auto inp = std::make_unique<llm_graph_input_attn_cross>(cross);
 
-    const int32_t n_enc = !cross->v_embd.empty() ? cross->n_enc : hparams.n_ctx_train;
+    const int32_t n_enc = !cross->v_embd.empty() ? cross->n_enc : cparams.n_ubatch;
 
     // flash attention requires an f16 mask
     const auto type_mask = cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;

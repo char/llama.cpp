@@ -329,6 +329,15 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
         ms.add_kv(LLM_KV_SWIGLU_CLAMP_EXP, 7.0f);
     }
 
+    if (arch == LLM_ARCH_ALICEAI_T5_MOE) {
+        ms.add_kv(LLM_KV_DECODER_BLOCK_COUNT, n_layer - 1);
+        ms.add_kv(LLM_KV_DECODER_START_TOKEN_ID, uint32_t(1));
+        ms.add_kv(LLM_KV_ENCODER_ATTENTION_HEAD_COUNT_KV, n_head);
+        ms.add_kv(LLM_KV_ATTENTION_HEAD_COUNT_KV, uint32_t(1));
+        ms.add_kv(LLM_KV_EXPERT_WEIGHTS_SCALE, 1.0f);
+        ms.add_kv(LLM_KV_EXPERT_WEIGHTS_NORM, true);
+    }
+
     ms.add_kv(LLM_KV_TOKENIZER_MODEL,         "no_vocab");
     // ms.add_kv(LLM_KV_DENSE_2_FEAT_OUT,     n_embd);
     // ms.add_kv(LLM_KV_DENSE_3_FEAT_IN,      n_embd);
@@ -461,6 +470,37 @@ static std::vector<float> get_logits(
     return ret;
 }
 
+static void test_encoder_decoder_batches(llama_model * model, llama_context * ctx, size_t seed) {
+    if (!llama_model_has_encoder(model) || !llama_model_has_decoder(model)) {
+        return;
+    }
+
+    const uint32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
+    auto decoder = get_tokens(8, n_vocab, seed);
+    for (uint32_t n_enc : {16u, 16u, 7u, 32u}) {
+        auto encoder = get_tokens(n_enc, n_vocab, ++seed);
+        llama_memory_clear(llama_get_memory(ctx), true);
+        GGML_ASSERT(llama_encode(ctx, llama_batch_get_one(encoder.data(), encoder.size())) == 0);
+        const auto expected = get_logits(model, ctx, decoder);
+
+        llama_memory_clear(llama_get_memory(ctx), true);
+        std::vector<float> actual;
+        int8_t outputs[] = {1, 1};
+        uint32_t pos = 0;
+        for (uint32_t count : {1u, 1u, 2u, 2u, 1u, 1u}) {
+            auto batch = llama_batch_get_one(decoder.data() + pos, count);
+            batch.logits = outputs;
+            GGML_ASSERT(llama_decode(ctx, batch) == 0);
+            for (uint32_t i = 0; i < count; ++i) {
+                const float * logits = llama_get_logits_ith(ctx, i);
+                actual.insert(actual.end(), logits, logits + n_vocab);
+            }
+            pos += count;
+        }
+        GGML_ASSERT(nmse(expected, actual) < 1e-4);
+    }
+}
+
 static bool moe_mandatory(const llm_arch arch) {
     switch (arch) {
         case LLM_ARCH_LLAMA4:
@@ -512,6 +552,7 @@ static bool moe_mandatory(const llm_arch arch) {
         case LLM_ARCH_MELLUM:
         case LLM_ARCH_LAGUNA:
         case LLM_ARCH_MAPLE:
+        case LLM_ARCH_ALICEAI_T5_MOE:
             return true;
         default:
             return false;
@@ -735,7 +776,7 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
             continue;
         }
 
-        const bool encode = arch == LLM_ARCH_T5 || arch == LLM_ARCH_DREAM || arch == LLM_ARCH_LLADA || arch == LLM_ARCH_LLADA_MOE || arch == LLM_ARCH_RND1;
+        const bool encode = arch == LLM_ARCH_T5 || arch == LLM_ARCH_ALICEAI_T5_MOE || arch == LLM_ARCH_DREAM || arch == LLM_ARCH_LLADA || arch == LLM_ARCH_LLADA_MOE || arch == LLM_ARCH_RND1;
         for (bool moe : {false, true}) {
             if (moe && !moe_implemented(arch)) {
                 continue;
@@ -771,6 +812,7 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
                     if (dc.split_mode != LLAMA_SPLIT_MODE_TENSOR || llm_arch_supports_sm_tensor(arch)) {
                         model_and_ctx_dev = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode);
                         logits_dev = get_logits(model_and_ctx_dev.first.get(), model_and_ctx_dev.second.get(), tokens, encode);
+                        test_encoder_decoder_batches(model_and_ctx_dev.first.get(), model_and_ctx_dev.second.get(), seed);
                         const double nmse_val = nmse(logits_cpu, logits_dev);
                         snprintf(nmse_str, sizeof(nmse_str), "(%.2e)", nmse_val);
                         status_nmse = "\033[1;32mOK\033[0m";
