@@ -1381,6 +1381,13 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
                 params.sampling.logit_bias_eog.begin(), params.sampling.logit_bias_eog.end());
     }
 
+    if (llama_model_has_encoder(model) && llama_model_has_decoder(model)) {
+        // Cross-attention state is shared by the whole context.
+        params.n_parallel = 1;
+        cparams.n_seq_max = 1;
+        params.sampling.backend_sampling = false;
+    }
+
     // init the backend samplers as part of the context creation
     pimpl->samplers.resize(cparams.n_seq_max);
     pimpl->samplers_seq_config.resize(cparams.n_seq_max);

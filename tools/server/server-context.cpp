@@ -441,6 +441,10 @@ struct server_slot {
     bool can_split() const {
         GGML_ASSERT(task);
 
+        if (llama_model_has_encoder(llama_get_model(ctx_tgt)) && llama_model_has_decoder(llama_get_model(ctx_tgt))) {
+            return false;
+        }
+
         return
             !task->need_embd() ||
             (llama_get_memory(ctx_tgt) && llama_pooling_type(ctx_tgt) == LLAMA_POOLING_TYPE_LAST);
@@ -896,6 +900,8 @@ private:
     common_speculative_ptr spec;
 
     bool add_bos_token = true;
+    bool encoder_decoder = false;
+    llama_tokens decoder_prefix;
 
     int32_t n_ctx; // total context for all clients / slots
 
@@ -1116,6 +1122,43 @@ private:
         n_ctx = llama_n_ctx(ctx_tgt);
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
+        encoder_decoder = llama_model_has_encoder(model_tgt) && llama_model_has_decoder(model_tgt);
+        if (encoder_decoder) {
+            if (has_spec || has_mmproj || !params_base.lora_adapters.empty()) {
+                SRV_ERR("%s", "encoder-decoder serving does not support speculative decoding, multimodal input or LoRA\n");
+                return false;
+            }
+            llama_token decoder_start = llama_model_decoder_start_token(model_tgt);
+            if (decoder_start == LLAMA_TOKEN_NULL) {
+                decoder_start = llama_vocab_bos(vocab);
+            }
+            if (decoder_start < 0 || decoder_start >= llama_vocab_n_tokens(vocab)) {
+                SRV_ERR("%s", "encoder-decoder model has no valid decoder start token\n");
+                return false;
+            }
+            decoder_prefix = {decoder_start};
+            char arch[64] = {};
+            llama_model_meta_val_str(model_tgt, "general.architecture", arch, sizeof(arch));
+            if (std::strcmp(arch, "aliceai_t5_moe") == 0) {
+                // AliceAI's infill sentinel is decoder input, not response text.
+                auto span = common_tokenize(vocab, "<SPAN#0>", false, true);
+                if (span.size() != 1 || common_token_to_piece(vocab, span[0], true) != "<SPAN#0>") {
+                    SRV_ERR("%s", "AliceAI requires a <SPAN#0> token\n");
+                    return false;
+                }
+                decoder_prefix.push_back(span[0]);
+            }
+            // Encoder outputs belong to the context, not individual KV sequences.
+            params_base.n_parallel = 1;
+            params_base.ctx_shift = false;
+            params_base.n_cache_reuse = 0;
+            params_base.cache_ram_mib = 0;
+            params_base.cache_idle_slots = false;
+            params_base.n_ctx_checkpoints = 0;
+            params_base.slot_save_path.clear();
+            prompt_cache.reset();
+            SRV_WRN("encoder-decoder mode: one slot, no prompt cache or context shift; encoder limit = %u tokens\n", llama_n_ubatch(ctx_tgt));
+        }
 
         if (has_spec) {
             // spec_mtp doesn't use load a model internally, so we report 0.0 and 1.0 manually
@@ -1237,7 +1280,7 @@ private:
 
         slots.clear();
 
-        ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
+        ctx_tgt_seq_rm_type = encoder_decoder ? COMMON_CONTEXT_SEQ_RM_TYPE_NO : common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
         }
@@ -1705,6 +1748,16 @@ private:
     }
 
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
+        if (encoder_decoder) {
+            if (!task.need_sampling() || task.is_parent() || task.is_child() || !task.params.lora.empty()) {
+                send_error(task, "Encoder-decoder serving supports text generation with one completion and no LoRA", ERROR_TYPE_NOT_SUPPORTED);
+                return false;
+            }
+            task.params.cache_prompt = false;
+            task.params.n_cache_reuse = 0;
+            task.params.sampling.backend_sampling = false;
+        }
+
         // process per-request lora adapters
         if (!task.params.lora.empty()) {
             auto task_loras = construct_lora_list(task.params.lora);
@@ -3600,7 +3653,9 @@ private:
                         slot.stats.n_gen = 0;
                         slot.i_batch     = batch.size() - 1;
 
-                        slot.init_sampler();
+                        if (!encoder_decoder) {
+                            slot.init_sampler();
+                        }
                     } else {
                         // skip ordinary mid-prompt checkpoints, unless the batch starts a user
                         // message or we are near the end of the prompt
@@ -3679,7 +3734,31 @@ private:
         // note: the sync is done here too, so that the wait is also covered by the yield
         int ret = 0;
         queue_tasks.yield_to_queue([&]() {
-            ret = llama_decode(ctx_tgt, batch_view);
+            if (encoder_decoder && slots[0].state == SLOT_STATE_DONE_PROMPT) {
+                auto & slot = slots[0];
+                auto encoder_batch = batch_view;
+                encoder_batch.logits = nullptr;
+                ret = llama_encode(ctx_tgt, encoder_batch);
+                if (ret != 0) {
+                    throw std::runtime_error("failed to encode prompt");
+                }
+
+                // The encoder prompt is not part of the decoder's KV history.
+                slot.prompt.clear();
+                slot.prompt.tokens.insert(decoder_prefix);
+                slot.init_sampler();
+                // Quantized MoE routing is sensitive to batching; keep prefix evaluation incremental.
+                for (auto & token : decoder_prefix) {
+                    auto decoder_batch = llama_batch_get_one(&token, 1);
+                    ret = llama_decode(ctx_tgt, decoder_batch);
+                    if (ret != 0) {
+                        break;
+                    }
+                }
+                slot.i_batch = off;
+            } else {
+                ret = llama_decode(ctx_tgt, batch_view);
+            }
             if (ret == 0 && has_output) {
                 llama_synchronize(ctx_tgt);
             }
